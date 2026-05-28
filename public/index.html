@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="نظام إدارة الحسابات - تطبيق ويب لإدارة ومتابعة الحسابات والأقساط">
   <title>إدارة الحسابات</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#6366f1">
+  <link rel="apple-touch-icon" href="/icon.png">
+  <link rel="icon" type="image/png" href="/icon.png">
   <link rel="stylesheet" href="/index.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.2/html2pdf.bundle.min.js" defer></script>
 </head>
@@ -16,10 +20,13 @@
       <div class="logo-icon">📊</div>
       <h1>إدارة الحسابات</h1>
     </a>
-    <div class="navbar-actions" id="navbar-actions"></div>
+    <div style="display: flex; gap: 12px; align-items: center;">
+      <button id="theme-toggle" class="btn btn-outline" style="border: none; font-size: 18px; padding: 4px 8px;" onclick="toggleTheme()" title="تغيير المظهر">
+        🌙
+      </button>
+      <div class="navbar-actions" id="navbar-actions"></div>
+    </div>
   </nav>
-
-  <!-- Main Content -->
   <main class="container" id="app">
     <!-- Dynamic content rendered here -->
   </main>

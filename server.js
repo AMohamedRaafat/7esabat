@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'حسابات');
 
 // Ensure data directory exists
@@ -20,7 +20,17 @@ function readExcelFile(filePath) {
   const wb = XLSX.readFile(filePath, { cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const data = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
-  return { wb, ws, data };
+  
+  let notes = '';
+  if (wb.SheetNames.includes('Metadata')) {
+    const metaWs = wb.Sheets['Metadata'];
+    const metaData = XLSX.utils.sheet_to_json(metaWs, { header: 1, defval: '' });
+    if (metaData.length > 0 && metaData[0].length > 0) {
+      notes = String(metaData[0][0] || '');
+    }
+  }
+
+  return { wb, ws, data, notes };
 }
 
 // ─── GET /api/cards — List all cards ─────────────────────────────
@@ -88,7 +98,8 @@ app.get('/api/cards/:name', (req, res) => {
     res.json({
       name: req.params.name,
       headers,
-      rows: formattedRows
+      rows: formattedRows,
+      notes
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -222,6 +233,116 @@ app.post('/api/cards', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── PUT /api/cards/:name/columns — Edit card columns ──────────────
+app.put('/api/cards/:name/columns', (req, res) => {
+  const fileName = req.params.name + '.xlsx';
+  const filePath = path.join(DATA_DIR, fileName);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Card not found' });
+  }
+
+  const { mappedColumns } = req.body;
+  if (!mappedColumns || !Array.isArray(mappedColumns) || mappedColumns.length === 0) {
+    return res.status(400).json({ error: 'mappedColumns are required' });
+  }
+
+  try {
+    const wb = XLSX.readFile(filePath, { cellDates: true });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    let data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+
+    if (data.length === 0) {
+      data = [mappedColumns.map(c => c.name)];
+    } else {
+      const newData = [];
+      const newHeaders = mappedColumns.map(c => c.name);
+      newData.push(newHeaders);
+
+      for (let r = 1; r < data.length; r++) {
+        const newRow = mappedColumns.map(c => {
+          if (c.oldIndex >= 0 && c.oldIndex < data[r].length) {
+            return data[r][c.oldIndex];
+          }
+          return ''; // new column data
+        });
+        newData.push(newRow);
+      }
+      data = newData;
+    }
+
+    const newWs = XLSX.utils.aoa_to_sheet(data);
+    wb.Sheets[wb.SheetNames[0]] = newWs;
+    XLSX.writeFile(wb, filePath);
+
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── PUT /api/cards/:name/rename — Rename a card ──────────────────
+app.put('/api/cards/:name/rename', (req, res) => {
+  const oldName = req.params.name;
+  const { newName } = req.body;
+
+  if (!newName) return res.status(400).json({ error: 'newName is required' });
+
+  const oldPath = path.join(DATA_DIR, oldName + '.xlsx');
+  const newPath = path.join(DATA_DIR, newName + '.xlsx');
+
+  if (!fs.existsSync(oldPath)) return res.status(404).json({ error: 'Card not found' });
+  if (fs.existsSync(newPath)) return res.status(409).json({ error: 'Name already exists' });
+
+  try {
+    fs.renameSync(oldPath, newPath);
+    res.json({ success: true, newName });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── PUT /api/cards/:name/notes — Update card notes ──────────────
+app.put('/api/cards/:name/notes', (req, res) => {
+  const fileName = req.params.name + '.xlsx';
+  const filePath = path.join(DATA_DIR, fileName);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Card not found' });
+  }
+
+  const { notes } = req.body;
+
+  try {
+    const wb = XLSX.readFile(filePath, { cellDates: true });
+    let metaWs;
+    if (!wb.SheetNames.includes('Metadata')) {
+      metaWs = XLSX.utils.aoa_to_sheet([[notes || '']]);
+      XLSX.utils.book_append_sheet(wb, metaWs, 'Metadata');
+    } else {
+      metaWs = wb.Sheets['Metadata'];
+      XLSX.utils.sheet_add_aoa(metaWs, [[notes || '']], { origin: 'A1' });
+    }
+
+    XLSX.writeFile(wb, filePath);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── GET /api/cards/:name/export-excel — Export as Excel ─────────
+app.get('/api/cards/:name/export-excel', (req, res) => {
+  const fileName = req.params.name + '.xlsx';
+  const filePath = path.join(DATA_DIR, fileName);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Card not found' });
+  }
+
+  res.download(filePath, fileName);
 });
 
 // ─── DELETE /api/cards/:name — Delete a card ─────────────────────
