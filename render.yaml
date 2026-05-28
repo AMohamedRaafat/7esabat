@@ -3,7 +3,3 @@ services:
     name: accounts-manager
     env: docker
     plan: free
-    disk:
-      name: accounts-data
-      mountPath: /app/حسابات
-      sizeGB: 1

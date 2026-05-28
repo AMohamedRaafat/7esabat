@@ -1,93 +1,62 @@
+require('dotenv').config();
 const express = require('express');
 const XLSX = require('xlsx');
 const path = require('path');
-const fs = require('fs');
+const mongoose = require('mongoose');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DATA_DIR = path.join(__dirname, 'حسابات');
-
-// Ensure data directory exists
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+const MONGO_URI = process.env.MONGO_URI;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── Helper: Read excel file safely ──────────────────────────────
-function readExcelFile(filePath) {
-  const wb = XLSX.readFile(filePath, { cellDates: true });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const data = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
-  
-  let notes = '';
-  if (wb.SheetNames.includes('Metadata')) {
-    const metaWs = wb.Sheets['Metadata'];
-    const metaData = XLSX.utils.sheet_to_json(metaWs, { header: 1, defval: '' });
-    if (metaData.length > 0 && metaData[0].length > 0) {
-      notes = String(metaData[0][0] || '');
-    }
-  }
-
-  return { wb, ws, data, notes };
+// ─── Database Connection ─────────────────────────────────────────
+if (!MONGO_URI) {
+  console.warn('⚠️ WARNING: MONGO_URI is not defined in .env! Database features will fail.');
+} else {
+  mongoose.connect(MONGO_URI)
+    .then(() => console.log('✅ Connected to MongoDB Atlas'))
+    .catch(err => console.error('❌ MongoDB Connection Error:', err));
 }
 
+// ─── Mongoose Schema ─────────────────────────────────────────────
+const cardSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  headers: { type: [String], default: [] },
+  rows: { type: [[mongoose.Schema.Types.Mixed]], default: [] },
+  notes: { type: String, default: '' }
+}, { timestamps: true });
+
+const Card = mongoose.model('Card', cardSchema);
+
 // ─── GET /api/cards — List all cards ─────────────────────────────
-app.get('/api/cards', (req, res) => {
+app.get('/api/cards', async (req, res) => {
   try {
-    const files = fs.readdirSync(DATA_DIR).filter(f => f.endsWith('.xlsx'));
-    const cards = files.map(f => {
-      try {
-        const { data } = readExcelFile(path.join(DATA_DIR, f));
-        const name = f.replace('.xlsx', '');
-        const headers = (data[0] || []).map(h => (h != null ? String(h) : ''));
-        const rows = data.slice(1).filter(r => r && r.some(c => c !== null && c !== undefined && c !== ''));
-        return {
-          name,
-          fileName: f,
-          headers: headers.filter(h => h !== ''),
-          rowCount: rows.length,
-          columnCount: headers.filter(h => h !== '').length
-        };
-      } catch (e) {
-        return {
-          name: f.replace('.xlsx', ''),
-          fileName: f,
-          headers: [],
-          rowCount: 0,
-          columnCount: 0,
-          error: e.message
-        };
-      }
-    });
-    res.json(cards);
+    const cards = await Card.find({}, 'name headers rows');
+    const result = cards.map(c => ({
+      name: c.name,
+      fileName: c.name + '.xlsx', // Kept for frontend compatibility
+      headers: c.headers,
+      rowCount: c.rows.length,
+      columnCount: c.headers.length
+    }));
+    res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
 // ─── GET /api/cards/:name — Get card data ────────────────────────
-app.get('/api/cards/:name', (req, res) => {
-  const fileName = req.params.name + '.xlsx';
-  const filePath = path.join(DATA_DIR, fileName);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Card not found' });
-  }
-
+app.get('/api/cards/:name', async (req, res) => {
   try {
-    const { data, notes } = readExcelFile(filePath);
-    const rawHeaders = data[0] || [];
-    const headers = rawHeaders.map(h => (h != null ? String(h) : ''));
-
-    // Get all non-empty rows
-    const rows = data.slice(1).filter(r => r && r.some(c => c !== null && c !== undefined && c !== ''));
-
-    // Pad each row to match header length
-    const formattedRows = rows.map(r => {
+    const card = await Card.findOne({ name: req.params.name });
+    if (!card) return res.status(404).json({ error: 'Card not found' });
+    
+    // Ensure rows are padded to match header length just like before
+    const formattedRows = card.rows.map(r => {
       const row = [];
-      for (let i = 0; i < headers.length; i++) {
+      for (let i = 0; i < card.headers.length; i++) {
         let val = r[i];
         if (val === null || val === undefined) val = '';
         row.push(String(val));
@@ -96,10 +65,10 @@ app.get('/api/cards/:name', (req, res) => {
     });
 
     res.json({
-      name: req.params.name,
-      headers,
+      name: card.name,
+      headers: card.headers,
       rows: formattedRows,
-      notes
+      notes: card.notes || ''
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -107,63 +76,39 @@ app.get('/api/cards/:name', (req, res) => {
 });
 
 // ─── POST /api/cards/:name/rows — Add a row ─────────────────────
-app.post('/api/cards/:name/rows', (req, res) => {
-  const fileName = req.params.name + '.xlsx';
-  const filePath = path.join(DATA_DIR, fileName);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Card not found' });
-  }
-
+app.post('/api/cards/:name/rows', async (req, res) => {
   try {
-    const wb = XLSX.readFile(filePath, { cellDates: true });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-
     const newRow = req.body.values;
-    if (!Array.isArray(newRow)) {
-      return res.status(400).json({ error: 'values must be an array' });
-    }
+    if (!Array.isArray(newRow)) return res.status(400).json({ error: 'values must be an array' });
 
-    data.push(newRow);
+    const card = await Card.findOne({ name: req.params.name });
+    if (!card) return res.status(404).json({ error: 'Card not found' });
 
-    const newWs = XLSX.utils.aoa_to_sheet(data);
-    wb.Sheets[wb.SheetNames[0]] = newWs;
-    XLSX.writeFile(wb, filePath);
+    card.rows.push(newRow);
+    card.markModified('rows');
+    await card.save();
 
-    const rowNumber = data.length - 1;
-    res.json({ success: true, rowNumber });
+    res.json({ success: true, rowNumber: card.rows.length - 1 });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
 // ─── DELETE /api/cards/:name/rows/:index — Delete a row ──────────
-app.delete('/api/cards/:name/rows/:index', (req, res) => {
-  const fileName = req.params.name + '.xlsx';
-  const filePath = path.join(DATA_DIR, fileName);
-  const rowIndex = parseInt(req.params.index, 10);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Card not found' });
-  }
-
+app.delete('/api/cards/:name/rows/:index', async (req, res) => {
   try {
-    const wb = XLSX.readFile(filePath, { cellDates: true });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    const rowIndex = parseInt(req.params.index, 10);
+    const card = await Card.findOne({ name: req.params.name });
+    if (!card) return res.status(404).json({ error: 'Card not found' });
 
-    // rowIndex is 0-based index of the data rows (excluding header)
-    const actualIndex = rowIndex + 1; // +1 for header row
-    if (actualIndex < 1 || actualIndex >= data.length) {
+    if (rowIndex < 0 || rowIndex >= card.rows.length) {
       return res.status(400).json({ error: 'Invalid row index' });
     }
 
-    data.splice(actualIndex, 1);
-
-    const newWs = XLSX.utils.aoa_to_sheet(data);
-    wb.Sheets[wb.SheetNames[0]] = newWs;
-    XLSX.writeFile(wb, filePath);
+    card.rows.splice(rowIndex, 1);
+    // Due to mixed types, tell mongoose this array changed
+    card.markModified('rows');
+    await card.save();
 
     res.json({ success: true });
   } catch (e) {
@@ -172,35 +117,22 @@ app.delete('/api/cards/:name/rows/:index', (req, res) => {
 });
 
 // ─── PUT /api/cards/:name/rows/:index — Update a row ─────────────
-app.put('/api/cards/:name/rows/:index', (req, res) => {
-  const fileName = req.params.name + '.xlsx';
-  const filePath = path.join(DATA_DIR, fileName);
-  const rowIndex = parseInt(req.params.index, 10);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Card not found' });
-  }
-
+app.put('/api/cards/:name/rows/:index', async (req, res) => {
   try {
-    const wb = XLSX.readFile(filePath, { cellDates: true });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    const rowIndex = parseInt(req.params.index, 10);
+    const newValues = req.body.values;
+    if (!Array.isArray(newValues)) return res.status(400).json({ error: 'values must be an array' });
 
-    const actualIndex = rowIndex + 1; // +1 for header row
-    if (actualIndex < 1 || actualIndex >= data.length) {
+    const card = await Card.findOne({ name: req.params.name });
+    if (!card) return res.status(404).json({ error: 'Card not found' });
+
+    if (rowIndex < 0 || rowIndex >= card.rows.length) {
       return res.status(400).json({ error: 'Invalid row index' });
     }
 
-    const newValues = req.body.values;
-    if (!Array.isArray(newValues)) {
-      return res.status(400).json({ error: 'values must be an array' });
-    }
-
-    data[actualIndex] = newValues;
-
-    const newWs = XLSX.utils.aoa_to_sheet(data);
-    wb.Sheets[wb.SheetNames[0]] = newWs;
-    XLSX.writeFile(wb, filePath);
+    card.rows[rowIndex] = newValues;
+    card.markModified('rows');
+    await card.save();
 
     res.json({ success: true });
   } catch (e) {
@@ -209,25 +141,23 @@ app.put('/api/cards/:name/rows/:index', (req, res) => {
 });
 
 // ─── POST /api/cards — Create a new card ─────────────────────────
-app.post('/api/cards', (req, res) => {
-  const { name, columns } = req.body;
-
-  if (!name || !columns || !Array.isArray(columns) || columns.length === 0) {
-    return res.status(400).json({ error: 'Name and columns are required' });
-  }
-
-  const fileName = name + '.xlsx';
-  const filePath = path.join(DATA_DIR, fileName);
-
-  if (fs.existsSync(filePath)) {
-    return res.status(409).json({ error: 'Card already exists' });
-  }
-
+app.post('/api/cards', async (req, res) => {
   try {
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet([columns]);
-    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
-    XLSX.writeFile(wb, filePath);
+    const { name, columns } = req.body;
+    if (!name || !columns || !Array.isArray(columns) || columns.length === 0) {
+      return res.status(400).json({ error: 'Name and columns are required' });
+    }
+
+    const existing = await Card.findOne({ name });
+    if (existing) return res.status(409).json({ error: 'Card already exists' });
+
+    const newCard = new Card({
+      name,
+      headers: columns,
+      rows: [],
+      notes: ''
+    });
+    await newCard.save();
 
     res.json({ success: true, name });
   } catch (e) {
@@ -236,46 +166,33 @@ app.post('/api/cards', (req, res) => {
 });
 
 // ─── PUT /api/cards/:name/columns — Edit card columns ──────────────
-app.put('/api/cards/:name/columns', (req, res) => {
-  const fileName = req.params.name + '.xlsx';
-  const filePath = path.join(DATA_DIR, fileName);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Card not found' });
-  }
-
-  const { mappedColumns } = req.body;
-  if (!mappedColumns || !Array.isArray(mappedColumns) || mappedColumns.length === 0) {
-    return res.status(400).json({ error: 'mappedColumns are required' });
-  }
-
+app.put('/api/cards/:name/columns', async (req, res) => {
   try {
-    const wb = XLSX.readFile(filePath, { cellDates: true });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    let data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-
-    if (data.length === 0) {
-      data = [mappedColumns.map(c => c.name)];
-    } else {
-      const newData = [];
-      const newHeaders = mappedColumns.map(c => c.name);
-      newData.push(newHeaders);
-
-      for (let r = 1; r < data.length; r++) {
-        const newRow = mappedColumns.map(c => {
-          if (c.oldIndex >= 0 && c.oldIndex < data[r].length) {
-            return data[r][c.oldIndex];
-          }
-          return ''; // new column data
-        });
-        newData.push(newRow);
-      }
-      data = newData;
+    const { mappedColumns } = req.body;
+    if (!mappedColumns || !Array.isArray(mappedColumns) || mappedColumns.length === 0) {
+      return res.status(400).json({ error: 'mappedColumns are required' });
     }
 
-    const newWs = XLSX.utils.aoa_to_sheet(data);
-    wb.Sheets[wb.SheetNames[0]] = newWs;
-    XLSX.writeFile(wb, filePath);
+    const card = await Card.findOne({ name: req.params.name });
+    if (!card) return res.status(404).json({ error: 'Card not found' });
+
+    const newHeaders = mappedColumns.map(c => c.name);
+    
+    // Remap all existing rows to match new column indexes
+    const newRows = card.rows.map(row => {
+      return mappedColumns.map(c => {
+        if (c.oldIndex >= 0 && c.oldIndex < row.length) {
+          return row[c.oldIndex];
+        }
+        return '';
+      });
+    });
+
+    card.headers = newHeaders;
+    card.rows = newRows;
+    card.markModified('headers');
+    card.markModified('rows');
+    await card.save();
 
     res.json({ success: true });
   } catch (e) {
@@ -284,20 +201,18 @@ app.put('/api/cards/:name/columns', (req, res) => {
 });
 
 // ─── PUT /api/cards/:name/rename — Rename a card ──────────────────
-app.put('/api/cards/:name/rename', (req, res) => {
-  const oldName = req.params.name;
-  const { newName } = req.body;
-
-  if (!newName) return res.status(400).json({ error: 'newName is required' });
-
-  const oldPath = path.join(DATA_DIR, oldName + '.xlsx');
-  const newPath = path.join(DATA_DIR, newName + '.xlsx');
-
-  if (!fs.existsSync(oldPath)) return res.status(404).json({ error: 'Card not found' });
-  if (fs.existsSync(newPath)) return res.status(409).json({ error: 'Name already exists' });
-
+app.put('/api/cards/:name/rename', async (req, res) => {
   try {
-    fs.renameSync(oldPath, newPath);
+    const oldName = req.params.name;
+    const { newName } = req.body;
+    if (!newName) return res.status(400).json({ error: 'newName is required' });
+
+    const existing = await Card.findOne({ name: newName });
+    if (existing) return res.status(409).json({ error: 'Name already exists' });
+
+    const card = await Card.findOneAndUpdate({ name: oldName }, { name: newName }, { new: true });
+    if (!card) return res.status(404).json({ error: 'Card not found' });
+
     res.json({ success: true, newName });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -305,28 +220,12 @@ app.put('/api/cards/:name/rename', (req, res) => {
 });
 
 // ─── PUT /api/cards/:name/notes — Update card notes ──────────────
-app.put('/api/cards/:name/notes', (req, res) => {
-  const fileName = req.params.name + '.xlsx';
-  const filePath = path.join(DATA_DIR, fileName);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Card not found' });
-  }
-
-  const { notes } = req.body;
-
+app.put('/api/cards/:name/notes', async (req, res) => {
   try {
-    const wb = XLSX.readFile(filePath, { cellDates: true });
-    let metaWs;
-    if (!wb.SheetNames.includes('Metadata')) {
-      metaWs = XLSX.utils.aoa_to_sheet([[notes || '']]);
-      XLSX.utils.book_append_sheet(wb, metaWs, 'Metadata');
-    } else {
-      metaWs = wb.Sheets['Metadata'];
-      XLSX.utils.sheet_add_aoa(metaWs, [[notes || '']], { origin: 'A1' });
-    }
+    const { notes } = req.body;
+    const card = await Card.findOneAndUpdate({ name: req.params.name }, { notes: notes || '' }, { new: true });
+    if (!card) return res.status(404).json({ error: 'Card not found' });
 
-    XLSX.writeFile(wb, filePath);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -334,28 +233,40 @@ app.put('/api/cards/:name/notes', (req, res) => {
 });
 
 // ─── GET /api/cards/:name/export-excel — Export as Excel ─────────
-app.get('/api/cards/:name/export-excel', (req, res) => {
-  const fileName = req.params.name + '.xlsx';
-  const filePath = path.join(DATA_DIR, fileName);
+app.get('/api/cards/:name/export-excel', async (req, res) => {
+  try {
+    const card = await Card.findOne({ name: req.params.name });
+    if (!card) return res.status(404).json({ error: 'Card not found' });
 
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Card not found' });
+    const wb = XLSX.utils.book_new();
+    
+    // Main data sheet
+    const wsData = [card.headers, ...card.rows];
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+    
+    // Notes sheet
+    if (card.notes) {
+      const metaWs = XLSX.utils.aoa_to_sheet([[card.notes]]);
+      XLSX.utils.book_append_sheet(wb, metaWs, 'Metadata');
+    }
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(card.name)}.xlsx"`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buffer);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-
-  res.download(filePath, fileName);
 });
 
 // ─── DELETE /api/cards/:name — Delete a card ─────────────────────
-app.delete('/api/cards/:name', (req, res) => {
-  const fileName = req.params.name + '.xlsx';
-  const filePath = path.join(DATA_DIR, fileName);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Card not found' });
-  }
-
+app.delete('/api/cards/:name', async (req, res) => {
   try {
-    fs.unlinkSync(filePath);
+    const card = await Card.findOneAndDelete({ name: req.params.name });
+    if (!card) return res.status(404).json({ error: 'Card not found' });
+
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
