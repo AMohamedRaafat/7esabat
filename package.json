@@ -1,0 +1,15 @@
+{
+  "name": "accounts-manager",
+  "version": "1.0.0",
+  "description": "Account management web application",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "pdfkit": "^0.18.0",
+    "puppeteer": "^25.1.0",
+    "xlsx": "^0.18.5"
+  }
+}
