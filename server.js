@@ -77,7 +77,7 @@ app.get('/api/cards/:name', (req, res) => {
   }
 
   try {
-    const { data } = readExcelFile(filePath);
+    const { data, notes } = readExcelFile(filePath);
     const rawHeaders = data[0] || [];
     const headers = rawHeaders.map(h => (h != null ? String(h) : ''));
 
